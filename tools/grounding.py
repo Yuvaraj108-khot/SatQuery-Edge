@@ -99,27 +99,40 @@ def _locate_regions(
     if t in ["nothing", "none", "unspecified target", "asdf", ""]:
         return [], [], []
 
+    b = img[:, :, 0].astype(np.float32)
+    g = img[:, :, 1].astype(np.float32)
+    r = img[:, :, 2].astype(np.float32)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
     if any(kw in t for kw in ["flood", "water", "inundated", "lake", "river"]):
-        mask = (
-            (hsv[:, :, 0] >= 85) & (hsv[:, :, 0] <= 140) &
-            (hsv[:, :, 1] >= 30)
-        ).astype(np.uint8) * 255
+        # RS Optical Water Index (NDWI_rgb) + Dark specular absorption mask
+        ndwi_rgb = (g - r) / (g + r + 1e-5)
+        water_mask = ((gray < 115) & ((ndwi_rgb > 0.01) | (b > r - 5))) | (gray < 65)
+        mask = (water_mask & (gray > 8)).astype(np.uint8) * 255
 
-    elif any(kw in t for kw in ["built", "building", "urban", "road", "structure"]):
-        mask = (
-            (hsv[:, :, 2] >= 130) &
-            (hsv[:, :, 1] <= 70)
-        ).astype(np.uint8) * 255
+    elif any(kw in t for kw in ["built", "building", "urban", "structure", "roof"]):
+        # Structural Buildings: High brightness + Strong local edge density (filters out smooth blank land)
+        edges = cv2.Canny(gray, 40, 120)
+        edge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+        edge_density = cv2.dilate(edges, edge_kernel)
+        buildup_mask = (gray >= 115) & (edge_density > 0)
+        mask = buildup_mask.astype(np.uint8) * 255
 
-    elif any(kw in t for kw in ["vegetation", "field", "forest", "crop", "green"]):
-        mask = (
-            (hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 85) &
-            (hsv[:, :, 1] >= 40)
-        ).astype(np.uint8) * 255
+    elif any(kw in t for kw in ["road", "highway", "street"]):
+        # Linear structure filter
+        edges = cv2.Canny(gray, 50, 150)
+        road_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 3))
+        roads = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, road_kernel)
+        mask = roads.astype(np.uint8) * 255
+
+    elif any(kw in t for kw in ["vegetation", "field", "forest", "crop", "green", "tree"]):
+        # Excess Green Index (ExG = 2G - R - B)
+        exg = 2 * g - r - b
+        veg_mask = (exg > 12) & (g > r)
+        mask = veg_mask.astype(np.uint8) * 255
 
     else:
         # Fallback to saliency contrast thresholding
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (11, 11), 0)
         _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
