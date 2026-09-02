@@ -129,9 +129,9 @@ def _locate_regions(
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    min_area = int(h * w * threshold)
+    min_area = max(40, int(h * w * 0.0005))
     contours = [c for c in contours if cv2.contourArea(c) >= min_area]
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:6]
 
     boxes: list[BoundingBox] = []
     polygons: list[GeoPolygon] = []
