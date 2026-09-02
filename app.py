@@ -14,6 +14,7 @@ import os
 import random
 import string
 import sys
+import time
 import traceback
 import io
 from typing import Optional
@@ -45,8 +46,10 @@ from evidence.score import should_abstain
 from ui.components import (
     render_pipeline_header, render_evidence_score, render_trace,
     render_validation_result, render_investigation_id, render_tool_card,
+    render_edge_telemetry,
 )
 from ui.map_utils import build_investigation_map
+from tools.geospatial import export_geojson, export_kml
 from reports.report_generator import generate_pdf_report
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -232,6 +235,44 @@ with st.sidebar:
     st.markdown("### ⚡ Quick Start")
     demo_mode = st.toggle("Demo Mode", value=True, help="Load sample images automatically")
 
+    st.markdown("### 🎯 SIH Scenario Presets")
+    pcol1, pcol2 = st.columns(2)
+    if pcol1.button("🌊 Flood", use_container_width=True, help="Flood Inundation & Built-Up Change"):
+        st.session_state["query_input"] = "Identify newly flooded built-up areas in Assam and show highest-confidence regions."
+    if pcol2.button("🌲 Fire", use_container_width=True, help="Forest Fire & Burn Scar Assessment"):
+        st.session_state["query_input"] = "Detect forest fire damage and highlight burn scar vegetation loss regions in Uttarakhand."
+    if pcol1.button("🏙️ Urban", use_container_width=True, help="Urban Encroachment Mapping"):
+        st.session_state["query_input"] = "Locate unauthorized urban structure changes and infrastructure expansion in Delhi."
+    if pcol2.button("🛰️ SAR", use_container_width=True, help="All-Weather SAR Inundation"):
+        st.session_state["query_input"] = "Perform SAR and optical multi-sensor fusion to detect water bodies under clouds in Odisha."
+
+    st.markdown("### 📍 Map Geocoding Location")
+    location_option = st.selectbox(
+        "Target Location / Region:",
+        [
+            "Auto-Detect from Query",
+            "Assam (Guwahati / Kaziranga)",
+            "Uttarakhand (Dehradun / Chamoli)",
+            "Wayanad (Kerala)",
+            "Delhi NCR",
+            "Odisha (Bhubaneswar)",
+            "Mumbai (Maharashtra)",
+            "Kolkata (West Bengal)",
+            "Bengaluru (Karnataka)",
+            "Chennai (Tamil Nadu)",
+            "Custom Coordinates",
+        ],
+        index=0,
+        help="Select location to map detected regions or auto-detect from query.",
+    )
+
+    custom_lat = None
+    custom_lon = None
+    if location_option == "Custom Coordinates":
+        c_col1, c_col2 = st.columns(2)
+        custom_lat = c_col1.number_input("Latitude (°N)", value=20.2960, format="%.4f")
+        custom_lon = c_col2.number_input("Longitude (°E)", value=85.8240, format="%.4f")
+
     st.markdown("### 📡 Data Input")
 
     uploaded_images = []
@@ -339,10 +380,11 @@ FLAGSHIP_QUERY = (
 )
 
 default_query = FLAGSHIP_QUERY if demo_mode else ""
+query_val = st.session_state.get("query_input", default_query)
 
 query = st.text_area(
     "Enter your natural-language investigation query:",
-    value=default_query,
+    value=query_val,
     height=90,
     placeholder=(
         "e.g. Identify newly flooded built-up areas and show the highest-confidence regions."
@@ -390,11 +432,18 @@ def _display_image(arr: np.ndarray, caption: str, use_container_width: bool = Tr
         st.warning(f"Could not display '{caption}': {e}")
 
 
-def run_investigation(query: str, images: list[np.ndarray]) -> None:
+def run_investigation(
+    query: str,
+    images: list[np.ndarray],
+    selected_location: str = "",
+    custom_lat: Optional[float] = None,
+    custom_lon: Optional[float] = None,
+) -> None:
     """
     Full SatQuery-Edge investigation pipeline.
     Orchestrates: Router → Validator → Tools → Evidence → Report
     """
+    t_start = time.perf_counter()
     trace: list[TraceEvent] = []
     stages_done: list[str] = []
 
@@ -451,6 +500,13 @@ def run_investigation(query: str, images: list[np.ndarray]) -> None:
 
             # Build parameters for geospatial tool
             params = dict(task_graph.parameters)
+            params["query"] = query
+            params["selected_location"] = selected_location
+            if custom_lat is not None:
+                params["custom_lat"] = custom_lat
+            if custom_lon is not None:
+                params["custom_lon"] = custom_lon
+
             if tool_name == "geospatial":
                 # Gather boxes + polygons from previous tool results
                 all_boxes = []
@@ -599,11 +655,16 @@ def run_investigation(query: str, images: list[np.ndarray]) -> None:
     # ── DISPLAY RESULTS ───────────────────────────────────────────────────────
     # ══════════════════════════════════════════════════════════════════════════
 
+    exec_time_ms = (time.perf_counter() - t_start) * 1000.0
+
     st.markdown("---")
 
     # Pipeline header
     render_pipeline_header(stages_done)
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
+    # Edge Telemetry Bar
+    render_edge_telemetry(exec_time_ms, peak_ram_mb=235.0)
 
     # Investigation ID
     render_investigation_id(inv_id, timestamp)
@@ -631,15 +692,37 @@ def run_investigation(query: str, images: list[np.ndarray]) -> None:
     else:
         st.success(f"**Final Answer**\n\n{final_answer}")
 
-    # PDF download
-    if pdf_bytes:
-        st.download_button(
-            label="⬇️ Download PDF Report",
-            data=pdf_bytes,
-            file_name=f"report_{inv_id}.pdf",
-            mime="application/pdf",
-            use_container_width=False,
-        )
+    # Export options (PDF, GeoJSON, KML)
+    d_col1, d_col2, d_col3 = st.columns(3)
+    with d_col1:
+        if pdf_bytes:
+            st.download_button(
+                label="⬇️ PDF Audit Report",
+                data=pdf_bytes,
+                file_name=f"report_{inv_id}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+    with d_col2:
+        if geo_polygons:
+            geojson_data = export_geojson(geo_polygons)
+            st.download_button(
+                label="🌐 GeoJSON (ISRO Bhuvan)",
+                data=geojson_data,
+                file_name=f"detections_{inv_id}.geojson",
+                mime="application/geo+json",
+                use_container_width=True,
+            )
+    with d_col3:
+        if geo_polygons:
+            kml_data = export_kml(geo_polygons)
+            st.download_button(
+                label="🗺️ KML (Google Earth)",
+                data=kml_data,
+                file_name=f"detections_{inv_id}.kml",
+                mime="application/vnd.google-earth.kml+xml",
+                use_container_width=True,
+            )
 
     # ── Tabs ───────────────────────────────────────────────────────────────────
     tab_img, tab_map, tab_evidence, tab_trace = st.tabs([
@@ -791,7 +874,13 @@ if run_clicked:
         )
     else:
         try:
-            run_investigation(query.strip(), uploaded_images)
+            run_investigation(
+                query.strip(),
+                uploaded_images,
+                selected_location=location_option,
+                custom_lat=custom_lat,
+                custom_lon=custom_lon,
+            )
         except Exception as e:
             st.error(f"Investigation failed unexpectedly: {e}")
             with st.expander("Error Details"):

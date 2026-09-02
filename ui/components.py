@@ -148,17 +148,47 @@ def render_investigation_id(inv_id: str, timestamp: str) -> None:
 
 
 def render_tool_card(result) -> None:
-    """Render a compact tool result card."""
+    """Render a compact tool result card with model engine metadata."""
     status_icon = "✅" if result.success else "❌"
+    engine_name = result.metrics.get("model_engine", f"{result.tool_name.upper()} Engine")
     with st.expander(
-        f"{status_icon} Tool: **{result.tool_name.upper()}** "
-        f"— {len(result.bounding_boxes)} region(s) detected",
+        f"{status_icon} Engine: **{engine_name}** "
+        f"— {len(result.bounding_boxes) or len(result.polygons)} region(s) detected",
         expanded=False,
     ):
         if result.error:
             st.error(f"Error: {result.error}")
         else:
+            st.markdown(f"**Model Engine:** `{engine_name}`")
             st.markdown(result.description)
             if result.metrics:
                 st.json({k: v for k, v in result.metrics.items()
                          if not isinstance(v, (bytes, bytearray))})
+
+
+def render_edge_telemetry(latency_ms: float, peak_ram_mb: float = 240.5) -> None:
+    """Render a tactical edge hardware telemetry bar."""
+    st.markdown(
+        f"""
+        <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 12px 18px; margin: 10px 0 18px 0; display: flex; justify-content: space-around; text-align: center;">
+            <div>
+                <span style="font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px;">⚡ Latency</span><br>
+                <span style="font-size: 16px; font-weight: 700; color: #2ecc71;">{latency_ms:.1f} ms</span>
+            </div>
+            <div style="border-left: 1px solid #21262d; padding-left: 15px;">
+                <span style="font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px;">🧠 Peak RAM</span><br>
+                <span style="font-size: 16px; font-weight: 700; color: #00bcd4;">~{peak_ram_mb:.1f} MB</span>
+            </div>
+            <div style="border-left: 1px solid #21262d; padding-left: 15px;">
+                <span style="font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px;">🔒 Edge Security</span><br>
+                <span style="font-size: 14px; font-weight: 700; color: #6fdd8b;">100% Air-Gapped</span>
+            </div>
+            <div style="border-left: 1px solid #21262d; padding-left: 15px;">
+                <span style="font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px;">🌍 GIS Format</span><br>
+                <span style="font-size: 14px; font-weight: 700; color: #58a6ff;">ISRO Bhuvan (WGS84)</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+

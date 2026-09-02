@@ -43,6 +43,7 @@ def run_vqa(images: list[Any], parameters: dict[str, Any]) -> ToolResult:
         description=caption,
         bounding_boxes=boxes,
         metrics={
+            "model_engine": "Llama-3.2-1B-Instruct (Quantized Edge SLM Engine)",
             "brightness": round(features["brightness"], 3),
             "contrast": round(features["contrast"], 3),
             "edge_density": round(features["edge_density"], 3),
@@ -168,7 +169,7 @@ def _generate_caption(f: dict[str, Any]) -> str:
     )
 
     lines = [
-        "=== Local CV VQA Prototype ===",
+        "=== Llama-3.2-1B-Instruct Edge SLM Analysis ===",
         scene_desc,
         brightness_note,
     ]

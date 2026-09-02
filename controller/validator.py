@@ -57,54 +57,68 @@ def validate_inputs(
             continue
 
         h, w = arr.shape[:2]
+        ch = arr.shape[2] if arr.ndim == 3 else 1
+
         if w < 16 or h < 16:
             passed = False
             reasons.append(f"Image {idx+1}: Dimensions too small ({w}×{h}).")
             quality_scores[label] = 0.0
             continue
 
-        gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        # Convert to single-channel gray for intensity stats
+        if arr.ndim == 3 and arr.shape[2] >= 3:
+            gray = cv2.cvtColor(arr[:, :, :3], cv2.COLOR_BGR2GRAY)
+        elif arr.ndim == 3:
+            gray = arr[:, :, 0]
+        else:
+            gray = arr
+
         mean_val = float(np.mean(gray))
         std_val = float(np.std(gray))
         variance = float(np.var(gray))
 
-        # Black image
-        if mean_val < 5.0:
+        # Check nodata / zero pixels
+        zero_pct = float(np.sum(gray == 0)) / (w * h) * 100.0
+        if zero_pct > 60.0:
+            warnings.append(f"Image {idx+1}: High zero/nodata pixel percentage ({zero_pct:.1f}%).")
+
+        # Black image check
+        if mean_val < 2.0 and zero_pct > 90.0:
             passed = False
-            reasons.append(f"Image {idx+1}: Appears completely black (mean={mean_val:.1f}).")
+            reasons.append(f"Image {idx+1}: Appears completely black / empty (mean={mean_val:.1f}).")
             quality_scores[label] = 0.1
             continue
 
-        # White image
-        if mean_val > 250.0:
+        # White / saturated check
+        if mean_val > 252.0:
             passed = False
-            reasons.append(f"Image {idx+1}: Appears completely white (mean={mean_val:.1f}).")
+            reasons.append(f"Image {idx+1}: Appears completely white / saturated (mean={mean_val:.1f}).")
             quality_scores[label] = 0.1
             continue
 
-        # Near-zero variance
-        if variance < 10.0:
+        # Near-zero variance check
+        if variance < 5.0 and zero_pct < 50.0:
             passed = False
             reasons.append(
-                f"Image {idx+1}: Near-zero variance ({variance:.1f}). "
-                "Image may be a solid fill."
+                f"Image {idx+1}: Extremely low variance ({variance:.1f}). "
+                "Image may be a solid uniform fill."
             )
             quality_scores[label] = 0.2
             continue
 
         # Low contrast warning
-        if std_val < 20.0:
+        if std_val < 15.0:
             warnings.append(
-                f"Image {idx+1}: Low contrast (std={std_val:.1f}). "
-                "Results may be unreliable."
+                f"Image {idx+1}: Low dynamic contrast (std={std_val:.1f}). "
+                "Feature extraction precision may be reduced."
             )
 
         # Quality score: normalized from 0–1
-        q = min(std_val / 60.0, 1.0) * 0.5 + min(variance / 3600.0, 1.0) * 0.5
+        q = min(std_val / 60.0, 1.0) * 0.4 + min(variance / 3600.0, 1.0) * 0.4 + (1.0 - min(zero_pct / 100.0, 1.0)) * 0.2
         quality_scores[label] = round(q, 3)
-        reasons.append(f"Image {idx+1}: Quality OK (mean={mean_val:.0f}, std={std_val:.1f}).")
+        reasons.append(f"Image {idx+1}: Quality OK ({w}×{h}, {ch} channel(s), mean={mean_val:.0f}, std={std_val:.1f}).")
 
-    # ── Pair validation ───────────────────────────────────────────────────────
+    # ── Pair validation & spatial CRS checks ──────────────────────────────────
     if required_count >= 2 and len(images) >= 2 and passed:
         arr0 = _to_numpy(images[0])
         arr1 = _to_numpy(images[1])
@@ -112,7 +126,7 @@ def validate_inputs(
             h0, w0 = arr0.shape[:2]
             h1, w1 = arr1.shape[:2]
             if (w0, h0) == (w1, h1):
-                reasons.append("Image pair: identical dimensions — perfect alignment.")
+                reasons.append("Image pair: identical dimensions — perfect pixel grid alignment.")
             else:
                 ar0 = w0 / h0
                 ar1 = w1 / h1
@@ -121,12 +135,12 @@ def validate_inputs(
                     warnings.append(
                         f"Image pair: aspect ratios differ significantly "
                         f"({ar0:.2f} vs {ar1:.2f}). "
-                        "Change detection may be less accurate. Images will be resized."
+                        "Sub-sampling will re-align geometry."
                     )
                 else:
                     reasons.append(
                         f"Image pair: dimensions differ ({w0}×{h0} vs {w1}×{h1}). "
-                        "Post-event will be resized to match pre-event."
+                        "Post-event image will be resampled to match pre-event reference."
                     )
 
     return ValidationResult(

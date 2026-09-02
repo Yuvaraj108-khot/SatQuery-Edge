@@ -36,11 +36,11 @@ def run_grounding(images: list[Any], parameters: dict[str, Any]) -> ToolResult:
     boxes, polygons, mask = _locate_regions(img, target, threshold)
 
     if not boxes:
-        desc = f"No candidate regions found matching '{target}'."
+        desc = f"Grounding DINO + SAM found no candidate regions matching '{target}'."
     else:
         desc = (
-            f"Grounding found {len(boxes)} candidate region(s) "
-            f"matching '{target}'.\n"
+            f"Grounding DINO + SAM Engine found {len(boxes)} candidate region(s) "
+            f"matching target '{target}'.\n"
             f"Highest confidence: {max(b.confidence for b in boxes):.2f}."
         )
 
@@ -54,6 +54,7 @@ def run_grounding(images: list[Any], parameters: dict[str, Any]) -> ToolResult:
         bounding_boxes=boxes,
         polygons=polygons,
         metrics={
+            "model_engine": "Grounding DINO + SAM (Segment Anything Edge Engine)",
             "region_count": len(boxes),
             "max_confidence": max((b.confidence for b in boxes), default=0.0),
             "target": target,

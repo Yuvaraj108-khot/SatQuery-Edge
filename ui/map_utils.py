@@ -39,8 +39,26 @@ def build_investigation_map(
         location=center,
         zoom_start=zoom,
         tiles="CartoDB dark_matter",
+        name="Tactical Dark",
         prefer_canvas=True,
     )
+
+    # Add Esri WorldImagery Satellite layer
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri WorldImagery",
+        name="Satellite Imagery",
+        overlay=False,
+        control=True,
+    ).add_to(m)
+
+    # Add OpenStreetMap layer
+    folium.TileLayer(
+        tiles="OpenStreetMap",
+        name="Street Map",
+        overlay=False,
+        control=True,
+    ).add_to(m)
 
     # Confidence color scale
     def _conf_color(conf: float) -> str:
@@ -103,5 +121,7 @@ def build_investigation_map(
             popup="⚠ Approximate demo georeferencing applied",
             icon=folium.Icon(color="orange", icon="info-sign"),
         ).add_to(m)
+
+    folium.LayerControl(position="topright").add_to(m)
 
     return m
