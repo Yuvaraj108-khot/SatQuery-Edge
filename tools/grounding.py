@@ -82,59 +82,115 @@ def _to_numpy(img: Any) -> np.ndarray | None:
         return None
 
 
+def _classify_landcover_kmeans(img: np.ndarray, target: str) -> np.ndarray:
+    """
+    K-Means Remote Sensing Spatial-Spectral Land-Cover Classifier.
+    Segments image into K=6 clusters using joint color + local texture variance.
+    Selects cluster(s) corresponding to target (water, building, vegetation, land).
+    """
+    h, w = img.shape[:2]
+    scale = min(1.0, 512.0 / max(h, w))
+    if scale < 1.0:
+        small = cv2.resize(img, (int(w * scale), int(h * scale)))
+    else:
+        small = img.copy()
+
+    sh, sw = small.shape[:2]
+    gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    b = small[:, :, 0].astype(np.float32)
+    g = small[:, :, 1].astype(np.float32)
+    r = small[:, :, 2].astype(np.float32)
+
+    # Local texture variance (Sobel gradient magnitude)
+    sobelx = cv2.Sobel(gray_small, cv2.CV_32F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray_small, cv2.CV_32F, 0, 1, ksize=3)
+    texture = np.sqrt(sobelx**2 + sobely**2)
+
+    # 5D Feature Array: [B, G, R, Gray, Texture]
+    features = np.stack([b, g, r, gray_small, texture * 1.5], axis=-1)
+    data = features.reshape((-1, 5)).astype(np.float32)
+
+    K = 6
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 15, 0.5)
+    _, labels, centers = cv2.kmeans(data, K, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
+    labels = labels.reshape((sh, sw))
+
+    t = target.lower().strip()
+    target_cluster_ids = []
+
+    for k in range(K):
+        cb, cg, cr, cgray, ctex = centers[k]
+        c_ndwi = (cg - cr) / (cg + cr + 1e-5)
+        c_exg = 2 * cg - cr - cb
+
+        if any(kw in t for kw in ["flood", "water", "inundated", "lake", "river"]):
+            score = (255.0 - cgray) * 1.5 + c_ndwi * 100.0 - ctex * 0.5
+            if cgray < 120 and (c_ndwi > -0.08 or cb > cr - 8):
+                target_cluster_ids.append((k, score))
+
+        elif any(kw in t for kw in ["built", "building", "urban", "structure", "roof"]):
+            score = ctex * 2.0 + cgray * 0.5
+            if ctex > 18.0 and cgray > 95:  # Must have structural texture
+                target_cluster_ids.append((k, score))
+
+        elif any(kw in t for kw in ["vegetation", "field", "forest", "crop", "green", "tree"]):
+            score = c_exg * 2.0 + (cg - cr) * 1.5
+            if c_exg > 5 or (cg > cr and cg > cb):
+                target_cluster_ids.append((k, score))
+
+        elif any(kw in t for kw in ["land", "soil", "dirt", "ground", "bare"]):
+            score = cgray * 1.5 - ctex * 2.0
+            if ctex < 22.0 and cgray > 90:
+                target_cluster_ids.append((k, score))
+
+    if not target_cluster_ids:
+        all_scores = []
+        for k in range(K):
+            cb, cg, cr, cgray, ctex = centers[k]
+            if "water" in t:
+                s = (255.0 - cgray) + (cg - cr)
+            elif "built" in t or "building" in t:
+                s = ctex
+            elif "veg" in t or "green" in t:
+                s = 2 * cg - cr - cb
+            else:
+                s = cgray - ctex
+            all_scores.append((k, s))
+        all_scores.sort(key=lambda x: x[1], reverse=True)
+        target_cluster_ids = [all_scores[0]]
+    else:
+        target_cluster_ids.sort(key=lambda x: x[1], reverse=True)
+
+    selected_mask_small = np.zeros((sh, sw), dtype=np.uint8)
+    for k, _ in target_cluster_ids[:2]:
+        selected_mask_small[labels == k] = 255
+
+    if scale < 1.0:
+        mask = cv2.resize(selected_mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
+    else:
+        mask = selected_mask_small
+
+    return mask
+
+
 def _locate_regions(
     img: np.ndarray,
     target: str,
     threshold: float,
 ) -> tuple[list[BoundingBox], list[GeoPolygon], list[np.ndarray]]:
     """
-    Segment candidate regions matching specific target descriptions.
+    Segment candidate regions matching specific target descriptions using K-Means RS Classifier.
     Returns bounding boxes, polygons, and valid contour arrays.
     """
     h, w = img.shape[:2]
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     t = target.lower().strip()
 
     # Reject unspecified / blank targets immediately
     if t in ["nothing", "none", "unspecified target", "asdf", ""]:
         return [], [], []
 
-    b = img[:, :, 0].astype(np.float32)
-    g = img[:, :, 1].astype(np.float32)
-    r = img[:, :, 2].astype(np.float32)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    if any(kw in t for kw in ["flood", "water", "inundated", "lake", "river"]):
-        # RS Optical Water Index (NDWI_rgb) + Dark specular absorption mask
-        ndwi_rgb = (g - r) / (g + r + 1e-5)
-        water_mask = ((gray < 115) & ((ndwi_rgb > 0.01) | (b > r - 5))) | (gray < 65)
-        mask = (water_mask & (gray > 8)).astype(np.uint8) * 255
-
-    elif any(kw in t for kw in ["built", "building", "urban", "structure", "roof"]):
-        # Structural Buildings: High brightness + Strong local edge density (filters out smooth blank land)
-        edges = cv2.Canny(gray, 40, 120)
-        edge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-        edge_density = cv2.dilate(edges, edge_kernel)
-        buildup_mask = (gray >= 115) & (edge_density > 0)
-        mask = buildup_mask.astype(np.uint8) * 255
-
-    elif any(kw in t for kw in ["road", "highway", "street"]):
-        # Linear structure filter
-        edges = cv2.Canny(gray, 50, 150)
-        road_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 3))
-        roads = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, road_kernel)
-        mask = roads.astype(np.uint8) * 255
-
-    elif any(kw in t for kw in ["vegetation", "field", "forest", "crop", "green", "tree"]):
-        # Excess Green Index (ExG = 2G - R - B)
-        exg = 2 * g - r - b
-        veg_mask = (exg > 12) & (g > r)
-        mask = veg_mask.astype(np.uint8) * 255
-
-    else:
-        # Fallback to saliency contrast thresholding
-        blurred = cv2.GaussianBlur(gray, (11, 11), 0)
-        _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Run K-Means Spatial-Spectral Classifier
+    mask = _classify_landcover_kmeans(img, t)
 
     # Morphological cleanup
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
