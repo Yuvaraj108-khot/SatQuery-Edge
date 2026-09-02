@@ -161,9 +161,11 @@ def _classify_landcover_kmeans(img: np.ndarray, target: str) -> np.ndarray:
     else:
         target_cluster_ids.sort(key=lambda x: x[1], reverse=True)
 
+    # Take ONLY the single best matching cluster to prevent merging background roads/land
     selected_mask_small = np.zeros((sh, sw), dtype=np.uint8)
-    for k, _ in target_cluster_ids[:2]:
-        selected_mask_small[labels == k] = 255
+    if target_cluster_ids:
+        best_k = target_cluster_ids[0][0]
+        selected_mask_small[labels == best_k] = 255
 
     if scale < 1.0:
         mask = cv2.resize(selected_mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
@@ -192,24 +194,35 @@ def _locate_regions(
     # Run K-Means Spatial-Spectral Classifier
     mask = _classify_landcover_kmeans(img, t)
 
-    # Morphological cleanup
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    # Morphological separation & erosion to disconnect touching structures
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.erode(mask, kernel, iterations=1)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    min_area = max(40, int(h * w * 0.0005))
-    contours = [c for c in contours if cv2.contourArea(c) >= min_area]
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:6]
+    min_area = max(50, int(h * w * 0.0008))
+    max_area = int(h * w * 0.25)  # Reject giant background blobs covering >25% of scene
 
+    valid_contours = []
     boxes: list[BoundingBox] = []
     polygons: list[GeoPolygon] = []
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        frac = area / (h * w)
-        conf = min(0.55 + frac * 2.0, 0.97)
+        if area < min_area or area > max_area:
+            continue
+
         x, y, cw, ch = cv2.boundingRect(cnt)
+        bw_frac = cw / w
+        bh_frac = ch / h
+
+        # Discard giant bounding boxes that span across the entire screen (>50% W and H)
+        if bw_frac > 0.55 and bh_frac > 0.55:
+            continue
+
+        frac = area / (h * w)
+        conf = min(0.60 + frac * 2.5, 0.96)
+        valid_contours.append(cnt)
 
         boxes.append(BoundingBox(
             x1=x / w, y1=y / h,
@@ -218,7 +231,7 @@ def _locate_regions(
             label=f"candidate {target[:20]}",
         ))
 
-        eps = 0.01 * cv2.arcLength(cnt, True)
+        eps = 0.015 * cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, eps, True)
         coords = [[float(pt[0][0]) / w, float(pt[0][1]) / h] for pt in approx]
         if len(coords) >= 3:
@@ -230,7 +243,10 @@ def _locate_regions(
                 is_demo_georef=True,
             ))
 
-    return boxes, polygons, contours
+        if len(boxes) >= 8:
+            break
+
+    return boxes, polygons, valid_contours
 
 
 def _draw_overlay(
