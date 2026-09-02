@@ -171,13 +171,20 @@ def route_query(query: str, num_images: int = 1, use_llama_controller: bool = Tr
 
 
 def _extract_target(query_lower: str) -> str:
-    """Heuristically extract a noun phrase target from the query."""
+    """Heuristically extract a target feature description from the query."""
+    q = query_lower.strip()
+    if q in ["nothing", "none", "asdf", "test", "hello", "hi", ""]:
+        return "unspecified target"
+
     targets = [
-        "flooded built-up areas", "flood", "water", "built-up", "roads",
-        "vegetation", "damage", "change", "region",
+        "flooded built-up areas", "flood", "water", "inundated", "river", "lake",
+        "built-up", "building", "structure", "road", "roads",
+        "vegetation", "forest", "crop", "field", "farm",
+        "fire", "burn scar", "damage", "change",
     ]
     for t in targets:
-        if t in query_lower:
+        if t in q:
             return t
-    return "regions of interest"
+    return "unspecified target"
+
 

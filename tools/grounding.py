@@ -30,13 +30,13 @@ def run_grounding(images: list[Any], parameters: dict[str, Any]) -> ToolResult:
             error="Could not decode image for grounding.",
         )
 
-    target = parameters.get("target_description", "regions of interest")
+    target = parameters.get("target_description", "unspecified target")
     threshold = float(parameters.get("threshold", 0.10))
 
-    boxes, polygons, mask = _locate_regions(img, target, threshold)
+    boxes, polygons, valid_contours = _locate_regions(img, target, threshold)
 
-    if not boxes:
-        desc = f"Grounding DINO + SAM found no candidate regions matching '{target}'."
+    if not boxes or target in ["unspecified target", "nothing", "none"]:
+        desc = f"No specific target feature found matching '{target}'. Please specify target keywords (e.g. water, flood, building, road, vegetation)."
     else:
         desc = (
             f"Grounding DINO + SAM Engine found {len(boxes)} candidate region(s) "
@@ -44,19 +44,19 @@ def run_grounding(images: list[Any], parameters: dict[str, Any]) -> ToolResult:
             f"Highest confidence: {max(b.confidence for b in boxes):.2f}."
         )
 
-    # Create color-highlighted overlay
-    overlay = _draw_overlay(img, boxes, mask)
+    # Create color-highlighted overlay for valid region contours only
+    overlay = _draw_overlay(img, boxes, valid_contours)
 
     return ToolResult(
         tool_name="grounding",
         success=True,
         description=desc,
-        bounding_boxes=boxes,
-        polygons=polygons,
+        bounding_boxes=boxes if target not in ["unspecified target", "nothing", "none"] else [],
+        polygons=polygons if target not in ["unspecified target", "nothing", "none"] else [],
         metrics={
             "model_engine": "Grounding DINO + SAM (Segment Anything Edge Engine)",
-            "region_count": len(boxes),
-            "max_confidence": max((b.confidence for b in boxes), default=0.0),
+            "region_count": len(boxes) if target not in ["unspecified target", "nothing", "none"] else 0,
+            "max_confidence": max((b.confidence for b in boxes), default=0.0) if target not in ["unspecified target", "nothing", "none"] else 0.0,
             "target": target,
         },
         image_outputs={"overlay": overlay},
@@ -86,41 +86,39 @@ def _locate_regions(
     img: np.ndarray,
     target: str,
     threshold: float,
-) -> tuple[list[BoundingBox], list[GeoPolygon], np.ndarray]:
+) -> tuple[list[BoundingBox], list[GeoPolygon], list[np.ndarray]]:
     """
-    Heuristically segment candidate regions.
-    For flood/water targets: use blue-channel + saturation heuristics.
-    For built-up: use high-value low-saturation heuristics.
-    Otherwise: use adaptive thresholding on grayscale.
+    Segment candidate regions matching specific target descriptions.
+    Returns bounding boxes, polygons, and valid contour arrays.
     """
     h, w = img.shape[:2]
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    t = target.lower().strip()
 
-    t = target.lower()
+    # Reject unspecified / blank targets immediately
+    if t in ["nothing", "none", "unspecified target", "asdf", ""]:
+        return [], [], []
 
     if any(kw in t for kw in ["flood", "water", "inundated", "lake", "river"]):
-        # Water-like: blue-ish hue, low brightness or dark
         mask = (
             (hsv[:, :, 0] >= 85) & (hsv[:, :, 0] <= 140) &
             (hsv[:, :, 1] >= 30)
         ).astype(np.uint8) * 255
 
     elif any(kw in t for kw in ["built", "building", "urban", "road", "structure"]):
-        # Built-up: high brightness, low saturation
         mask = (
             (hsv[:, :, 2] >= 130) &
             (hsv[:, :, 1] <= 70)
         ).astype(np.uint8) * 255
 
     elif any(kw in t for kw in ["vegetation", "field", "forest", "crop", "green"]):
-        # Vegetation: green hue
         mask = (
             (hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 85) &
             (hsv[:, :, 1] >= 40)
         ).astype(np.uint8) * 255
 
     else:
-        # Generic: Otsu threshold
+        # Fallback to saliency contrast thresholding
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (11, 11), 0)
         _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -133,7 +131,7 @@ def _locate_regions(
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     min_area = int(h * w * threshold)
     contours = [c for c in contours if cv2.contourArea(c) >= min_area]
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:6]
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
 
     boxes: list[BoundingBox] = []
     polygons: list[GeoPolygon] = []
@@ -151,7 +149,6 @@ def _locate_regions(
             label=f"candidate {target[:20]}",
         ))
 
-        # Approximate polygon from contour (simplified)
         eps = 0.01 * cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, eps, True)
         coords = [[float(pt[0][0]) / w, float(pt[0][1]) / h] for pt in approx]
@@ -164,25 +161,30 @@ def _locate_regions(
                 is_demo_georef=True,
             ))
 
-    return boxes, polygons, mask
+    return boxes, polygons, contours
 
 
 def _draw_overlay(
     img: np.ndarray,
     boxes: list[BoundingBox],
-    mask: np.ndarray,
+    contours: list[np.ndarray],
 ) -> np.ndarray:
     h, w = img.shape[:2]
     overlay = img.copy()
 
-    # Tint mask region cyan
-    if mask is not None:
+    # Draw shaded fill ONLY inside top valid region contours
+    if contours:
+        contour_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(contour_mask, contours, -1, 255, -1)
+        
         tint = np.zeros_like(img)
-        tint[:, :] = (255, 200, 0)  # BGR: cyan-ish
-        tinted = cv2.addWeighted(overlay, 0.6, tint, 0.4, 0)
-        overlay[mask > 0] = tinted[mask > 0]
+        tint[:, :] = (255, 200, 0)  # BGR: cyan
+        tinted = cv2.addWeighted(overlay, 0.65, tint, 0.35, 0)
+        overlay[contour_mask > 0] = tinted[contour_mask > 0]
+        
+        cv2.drawContours(overlay, contours, -1, (255, 255, 0), 2)
 
-    # Draw bounding boxes
+    # Draw bounding box outlines
     for b in boxes:
         x1 = int(b.x1 * w)
         y1 = int(b.y1 * h)
